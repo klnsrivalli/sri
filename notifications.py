@@ -1,0 +1,301 @@
+import smtplib
+import requests
+import json
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+from typing import Optional, Dict, Any
+import logging
+from datetime import datetime
+
+from config import settings
+from models import Alert
+
+logger = logging.getLogger(__name__)
+
+class NotificationManager:
+    def __init__(self):
+        self.slack_webhook_url = settings.SLACK_WEBHOOK_URL
+        self.email_config = {
+            'smtp_server': settings.EMAIL_SMTP_SERVER,
+            'username': settings.EMAIL_USERNAME,
+            'password': settings.EMAIL_PASSWORD
+        }
+    
+    def send_alert(self, alert: Alert):
+        """Send alert through all configured notification channels"""
+        try:
+            # Send to Slack if configured
+            if self.slack_webhook_url:
+                self.send_slack_notification(alert)
+            
+            # Send email if configured
+            if all(self.email_config.values()):
+                self.send_email_notification(alert)
+            
+            logger.info(f"Alert sent: {alert.alert_type} - {alert.message}")
+        
+        except Exception as e:
+            logger.error(f"Error sending notification: {e}")
+    
+    def send_slack_notification(self, alert: Alert):
+        """Send notification to Slack"""
+        try:
+            # Create Slack message
+            color = self._get_severity_color(alert.severity)
+            emoji = self._get_alert_emoji(alert.alert_type)
+            
+            message = {
+                "attachments": [
+                    {
+                        "color": color,
+                        "title": f"{emoji} {alert.alert_type.replace('_', ' ').title()}",
+                        "text": alert.message,
+                        "fields": [
+                            {
+                                "title": "Severity",
+                                "value": alert.severity.upper(),
+                                "short": True
+                            },
+                            {
+                                "title": "Time",
+                                "value": alert.created_at.strftime("%Y-%m-%d %H:%M:%S"),
+                                "short": True
+                            }
+                        ],
+                        "footer": "E-commerce Competitor Monitor"
+                    }
+                ]
+            }
+            
+            # Add metadata if available
+            metadata = alert.get_metadata()
+            if metadata:
+                metadata_text = "\n".join([f"• {k}: {v}" for k, v in metadata.items()])
+                message["attachments"][0]["fields"].append({
+                    "title": "Additional Info",
+                    "value": metadata_text,
+                    "short": False
+                })
+            
+            # Send to Slack
+            response = requests.post(
+                self.slack_webhook_url,
+                json=message,
+                headers={'Content-Type': 'application/json'},
+                timeout=10
+            )
+            
+            if response.status_code != 200:
+                logger.error(f"Slack notification failed: {response.status_code} - {response.text}")
+        
+        except Exception as e:
+            logger.error(f"Error sending Slack notification: {e}")
+    
+    def send_email_notification(self, alert: Alert, recipients: list = None):
+        """Send notification via email"""
+        try:
+            if not recipients:
+                recipients = [self.email_config['username']]  # Send to self if no recipients specified
+            
+            # Create email message
+            msg = MIMEMultipart()
+            msg['From'] = self.email_config['username']
+            msg['To'] = ', '.join(recipients)
+            msg['Subject'] = f"Alert: {alert.alert_type.replace('_', ' ').title()} - {alert.severity.upper()}"
+            
+            # Create email body
+            body = f"""
+            <html>
+            <body>
+                <h2>🚨 Competitor Monitoring Alert</h2>
+                <p><strong>Type:</strong> {alert.alert_type.replace('_', ' ').title()}</p>
+                <p><strong>Severity:</strong> {alert.severity.upper()}</p>
+                <p><strong>Time:</strong> {alert.created_at.strftime("%Y-%m-%d %H:%M:%S")}</p>
+                <p><strong>Message:</strong></p>
+                <p>{alert.message}</p>
+            """
+            
+            # Add metadata if available
+            metadata = alert.get_metadata()
+            if metadata:
+                body += "<p><strong>Additional Information:</strong></p><ul>"
+                for key, value in metadata.items():
+                    body += f"<li><strong>{key}:</strong> {value}</li>"
+                body += "</ul>"
+            
+            body += """
+                <hr>
+                <p><em>This alert was generated by the E-commerce Competitor Monitoring System.</em></p>
+            </body>
+            </html>
+            """
+            
+            msg.attach(MIMEText(body, 'html'))
+            
+            # Send email
+            with smtplib.SMTP(self.email_config['smtp_server'], 587) as server:
+                server.starttls()
+                server.login(self.email_config['username'], self.email_config['password'])
+                server.send_message(msg)
+            
+            logger.info(f"Email notification sent to {recipients}")
+        
+        except Exception as e:
+            logger.error(f"Error sending email notification: {e}")
+    
+    def send_daily_summary(self, summary_data: Dict[str, Any], recipients: list = None):
+        """Send daily monitoring summary"""
+        try:
+            if not recipients:
+                recipients = [self.email_config['username']]
+            
+            msg = MIMEMultipart()
+            msg['From'] = self.email_config['username']
+            msg['To'] = ', '.join(recipients)
+            msg['Subject'] = f"Daily Monitoring Summary - {datetime.now().strftime('%Y-%m-%d')}"
+            
+            body = f"""
+            <html>
+            <body>
+                <h2>📊 Daily Monitoring Summary</h2>
+                <p><strong>Date:</strong> {datetime.now().strftime('%Y-%m-%d')}</p>
+                
+                <h3>Overall Statistics</h3>
+                <ul>
+                    <li><strong>Total Products Monitored:</strong> {summary_data.get('total_products', 0)}</li>
+                    <li><strong>Successful Scrapes:</strong> {summary_data.get('successful_scrapes', 0)}</li>
+                    <li><strong>Failed Scrapes:</strong> {summary_data.get('failed_scrapes', 0)}</li>
+                    <li><strong>Price Changes Detected:</strong> {summary_data.get('price_changes', 0)}</li>
+                    <li><strong>Availability Changes:</strong> {summary_data.get('availability_changes', 0)}</li>
+                </ul>
+            """
+            
+            # Add competitor-specific results
+            if 'competitor_results' in summary_data:
+                body += "<h3>Competitor Results</h3>"
+                for competitor, results in summary_data['competitor_results'].items():
+                    body += f"""
+                    <h4>{competitor}</h4>
+                    <ul>
+                        <li>Products Monitored: {results.get('products_monitored', 0)}</li>
+                        <li>Successful: {results.get('successful_scrapes', 0)}</li>
+                        <li>Failed: {results.get('failed_scrapes', 0)}</li>
+                        <li>Price Changes: {results.get('price_changes', 0)}</li>
+                        <li>Availability Changes: {results.get('availability_changes', 0)}</li>
+                    </ul>
+                    """
+            
+            body += """
+                <hr>
+                <p><em>This summary was generated by the E-commerce Competitor Monitoring System.</em></p>
+            </body>
+            </html>
+            """
+            
+            msg.attach(MIMEText(body, 'html'))
+            
+            # Send email
+            with smtplib.SMTP(self.email_config['smtp_server'], 587) as server:
+                server.starttls()
+                server.login(self.email_config['username'], self.email_config['password'])
+                server.send_message(msg)
+            
+            logger.info(f"Daily summary sent to {recipients}")
+        
+        except Exception as e:
+            logger.error(f"Error sending daily summary: {e}")
+    
+    def send_slack_summary(self, summary_data: Dict[str, Any]):
+        """Send daily summary to Slack"""
+        try:
+            if not self.slack_webhook_url:
+                return
+            
+            # Create summary message
+            message = {
+                "attachments": [
+                    {
+                        "color": "#36a64f",
+                        "title": "📊 Daily Monitoring Summary",
+                        "text": f"Summary for {datetime.now().strftime('%Y-%m-%d')}",
+                        "fields": [
+                            {
+                                "title": "Total Products",
+                                "value": str(summary_data.get('total_products', 0)),
+                                "short": True
+                            },
+                            {
+                                "title": "Successful Scrapes",
+                                "value": str(summary_data.get('successful_scrapes', 0)),
+                                "short": True
+                            },
+                            {
+                                "title": "Price Changes",
+                                "value": str(summary_data.get('price_changes', 0)),
+                                "short": True
+                            },
+                            {
+                                "title": "Availability Changes",
+                                "value": str(summary_data.get('availability_changes', 0)),
+                                "short": True
+                            }
+                        ],
+                        "footer": "E-commerce Competitor Monitor"
+                    }
+                ]
+            }
+            
+            # Send to Slack
+            response = requests.post(
+                self.slack_webhook_url,
+                json=message,
+                headers={'Content-Type': 'application/json'},
+                timeout=10
+            )
+            
+            if response.status_code != 200:
+                logger.error(f"Slack summary failed: {response.status_code} - {response.text}")
+        
+        except Exception as e:
+            logger.error(f"Error sending Slack summary: {e}")
+    
+    def _get_severity_color(self, severity: str) -> str:
+        """Get color for severity level"""
+        colors = {
+            'low': '#36a64f',      # Green
+            'medium': '#ff9500',   # Orange
+            'high': '#ff0000'      # Red
+        }
+        return colors.get(severity.lower(), '#808080')  # Default gray
+    
+    def _get_alert_emoji(self, alert_type: str) -> str:
+        """Get emoji for alert type"""
+        emojis = {
+            'price_change': '💰',
+            'availability_change': '📦',
+            'new_product': '🆕',
+            'error': '❌'
+        }
+        return emojis.get(alert_type, '🔔')
+    
+    def test_notifications(self):
+        """Test notification channels"""
+        test_alert = Alert(
+            product_id=1,
+            alert_type="test",
+            message="This is a test notification from the E-commerce Competitor Monitor",
+            severity="medium"
+        )
+        test_alert.created_at = datetime.utcnow()
+        
+        print("Testing notifications...")
+        
+        if self.slack_webhook_url:
+            print("Testing Slack notification...")
+            self.send_slack_notification(test_alert)
+        
+        if all(self.email_config.values()):
+            print("Testing email notification...")
+            self.send_email_notification(test_alert)
+        
+        print("Notification test completed!")
